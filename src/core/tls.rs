@@ -26,7 +26,8 @@ use crate::{
 ///
 /// # #[cfg(feature = "native-tls-backend")]
 /// # {
-///     let identity = smtpd::Identity::default();
+///     let der: Vec<u8> = vec![];
+///     let identity = smtpd::Identity::from_pkcs12(der.as_slice(), "password").unwrap();
 ///     let tls_config = TlsConfig::NativeTls(identity);
 ///
 ///     let _config = SmtpConfig {
@@ -163,8 +164,12 @@ impl TlsProvider {
 /// use smtpd::{TlsMode, TlsConfig, Identity};
 ///
 /// // Explicit TLS (STARTTLS supported but optional)
-/// let tls_config = TlsConfig::NativeTls(Identity::default());
-/// let mode = TlsMode::Explicit(tls_config);
+/// let der: Vec<u8> = vec![];
+/// let identity = smtpd::Identity::from_pkcs12(der.as_slice(), "password").unwrap();
+/// let tls_config = TlsConfig::NativeTls(identity);
+/// 
+/// // opportunistic tls
+/// let mode = TlsMode::Explicit(tls_config.clone());
 ///
 /// // Required TLS (STARTTLS mandatory)
 /// let required_mode = TlsMode::Required(tls_config.clone());

@@ -221,7 +221,10 @@ impl ConnectionStream {
     #[cfg(any(feature = "native-tls-backend", feature = "rustls-backend"))]
     pub fn is_tls(&self) -> bool {
         match self {
-            Self::NativeTls(_) | Self::Rustls(_) => true,
+            #[cfg(feature = "native-tls-backend")]
+            Self::NativeTls(_) => true,
+            #[cfg(feature = "rustls-backend")]
+            Self::Rustls(_) => true,
             Self::Tcp(_) => false,
         }
     }
