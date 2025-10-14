@@ -39,9 +39,9 @@ pub mod tls;
 ///     start_server(config, factory).await?;
 ///     Ok(())
 /// }
-/// 
+///
 /// struct MyHandler;
-/// 
+///
 /// #[async_trait]
 /// impl SmtpHandler for MyHandler{}
 ///
@@ -218,12 +218,10 @@ impl AsyncWrite for ConnectionStream {
 impl Unpin for ConnectionStream {}
 
 impl ConnectionStream {
+    #[cfg(any(feature = "native-tls-backend", feature = "rustls-backend"))]
     pub fn is_tls(&self) -> bool {
         match self {
-            #[cfg(feature = "native-tls-backend")]
-            Self::NativeTls(_) => true,
-            #[cfg(feature = "rustls-backend")]
-            Self::Rustls(_) => true,
+            Self::NativeTls(_) | Self::Rustls(_) => true,
             Self::Tcp(_) => false,
         }
     }

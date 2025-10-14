@@ -22,6 +22,7 @@ pub(crate) struct StreamController {
     pub writer: BufWriter<WriteHalf<ConnectionStream>>,
 
     /// Whether the connection is currently encrypted via TLS.
+    #[cfg(any(feature = "native-tls-backend", feature = "rustls-backend"))]
     pub is_tls: bool,
 
     /// Timeout duration applied to each read/write operation.
@@ -40,11 +41,14 @@ impl StreamController {
     /// Splits the stream into read and write halves, wraps them in buffered readers/writers,
     /// and stores the timeout for all I/O operations.
     pub fn new(stream: ConnectionStream, timeout: core::time::Duration) -> Self {
+        #[cfg(any(feature = "native-tls-backend", feature = "rustls-backend"))]
         let is_tls = stream.is_tls();
+
         let (read_half, write_half) = tokio::io::split(stream);
         Self {
             reader: BufReader::new(read_half),
             writer: BufWriter::new(write_half),
+            #[cfg(any(feature = "native-tls-backend", feature = "rustls-backend"))]
             is_tls,
             timeout,
         }

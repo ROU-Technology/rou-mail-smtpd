@@ -30,6 +30,7 @@ use crate::{core::{error::Error, stream::StreamController}, utils::parser::{pars
 /// # Notes
 /// - This function is called internally during command processing before attempting
 ///   to upgrade the connection to TLS.
+#[cfg(any(feature = "native-tls-backend", feature = "rustls-backend"))]
 pub fn handle_start_tls_cmd<'a>(
     args: Option<&str>,
     controller: &StreamController,
@@ -85,6 +86,7 @@ pub async fn get_auth_data<'a>(
     session: &mut Session<'a>,
     controller: &mut StreamController,
 ) -> std::result::Result<AuthData, Error> {
+    #[cfg(any(feature = "native-tls-backend", feature = "rustls-backend"))]
     if session.smtp_config.tls_mode.tls_mandatory() && !controller.is_tls {
         return Err(Error::Response(Response::reject(
             "Must issue a STARTTLS command first",
@@ -267,6 +269,7 @@ pub async fn handle_mail_cmd<'a>(
     controller: &mut StreamController,
 ) -> std::result::Result<(), Error> {
     // Enforce TLS if required
+    #[cfg(any(feature = "native-tls-backend", feature = "rustls-backend"))]
     if session.smtp_config.tls_mode.tls_mandatory() && !controller.is_tls {
         return Err(Error::Response(Response::reject(
             "Must issue a STARTTLS command first",
@@ -349,6 +352,7 @@ pub async fn extract_rcpt_from_arg<'a>(
     session: &mut Session<'a>,
 ) -> std::result::Result<String, Error> {
     // Enforce TLS if required
+    #[cfg(any(feature = "native-tls-backend", feature = "rustls-backend"))]
     if session.smtp_config.tls_mode.tls_mandatory() && !session.tls {
         return Err(Error::Response(Response::reject(
             "Must issue a STARTTLS command first",
@@ -412,6 +416,7 @@ pub async fn extract_mail_data<'a>(
     controller: &mut StreamController,
 ) -> std::result::Result<Vec<u8>, Error> {
     // Enforce TLS if required
+    #[cfg(any(feature = "native-tls-backend", feature = "rustls-backend"))]
     if session.smtp_config.tls_mode.tls_mandatory() && !controller.is_tls {
         return Err(Error::Response(Response::reject(
             "Must issue a STARTTLS command first",

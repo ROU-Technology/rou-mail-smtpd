@@ -1,13 +1,15 @@
 use trust_dns_resolver::TokioAsyncResolver;
 
+#[cfg(any(feature = "native-tls-backend", feature = "rustls-backend"))]
 use crate::core::ConnectionStream;
 use crate::core::error::Error as CoreError;
 use crate::core::stream::StreamController;
 #[cfg(any(feature = "native-tls-backend", feature = "rustls-backend"))]
 use crate::core::tls::TlsProvider;
+#[cfg(any(feature = "native-tls-backend", feature = "rustls-backend"))]
+use crate::utils::handler::handle_start_tls_cmd;
 use crate::utils::handler::{
     extract_mail_data, extract_rcpt_from_arg, get_auth_data, get_remote_host, handle_mail_cmd,
-    handle_start_tls_cmd,
 };
 use crate::utils::parser::parse_cmd;
 use crate::{Error, Response, SmtpConfig, SmtpHandler, SmtpHandlerFactory};
@@ -64,6 +66,7 @@ pub async fn handle_client<T: SmtpHandlerFactory + Send + Sync + 'static>(
         &config,
         addr.ip().to_string(),
         remote_host,
+        #[cfg(any(feature = "native-tls-backend", feature = "rustls-backend"))]
         controller.is_tls,
     );
     let mut handler = handler_factory.new_handler(&session);
@@ -89,6 +92,7 @@ pub async fn handle_client<T: SmtpHandlerFactory + Send + Sync + 'static>(
 
                 match command.as_str() {
                     "STARTTLS" => {
+                        #[cfg(any(feature = "native-tls-backend", feature = "rustls-backend"))]
                         match handle_start_tls_cmd(args, &controller, &session) {
                             Ok(()) => {
                                 // Inform client we’re ready
@@ -96,10 +100,6 @@ pub async fn handle_client<T: SmtpHandlerFactory + Send + Sync + 'static>(
 
                                 let stream: ConnectionStream = controller.into();
 
-                                #[cfg(any(
-                                    feature = "native-tls-backend",
-                                    feature = "rustls-backend"
-                                ))]
                                 let stream = match stream {
                                     ConnectionStream::Tcp(stream) => match provider.as_ref() {
                                         Some(p) => p.accept(stream).await?,
@@ -123,6 +123,17 @@ pub async fn handle_client<T: SmtpHandlerFactory + Send + Sync + 'static>(
                                 }
                             }
                         };
+
+                        #[cfg(not(any(
+                            feature = "native-tls-backend",
+                            feature = "rustls-backend"
+                        )))]
+                        {
+                            controller
+                                .write_response(&Response::not_implemented())
+                                .await?;
+                            break;
+                        }
                     }
                     "QUIT" => {
                         controller
@@ -172,6 +183,7 @@ pub async fn handle_client<T: SmtpHandlerFactory + Send + Sync + 'static>(
                         .unwrap();
 
                         // STARTTLS if enabled
+                        #[cfg(any(feature = "native-tls-backend", feature = "rustls-backend"))]
                         if session.smtp_config.tls_mode.has_tls() {
                             writeln!(message, "250-STARTTLS").unwrap();
                         }
@@ -198,6 +210,7 @@ pub async fn handle_client<T: SmtpHandlerFactory + Send + Sync + 'static>(
                         controller.write_response(&Response::ok("OK")).await?;
                     }
                     "RSET" => {
+                        #[cfg(any(feature = "native-tls-backend", feature = "rustls-backend"))]
                         if session.smtp_config.tls_mode.tls_mandatory() && !controller.is_tls {
                             controller
                                 .write_line("530 5.7.0 Must issue a STARTTLS command first")

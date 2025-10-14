@@ -47,6 +47,7 @@ pub struct Session<'a> {
     pub remote_host: String,
 
     /// Indicates whether the connection is currently encrypted via TLS.
+    #[cfg(any(feature = "native-tls-backend", feature = "rustls-backend"))]
     pub tls: bool,
 
     /// Tracks whether the session has received a valid `MAIL FROM` command.
@@ -62,7 +63,7 @@ impl<'a> Session<'a> {
         config: &'a super::SmtpConfig,
         remote_ip: String,
         remote_host: String,
-        is_tls: bool,
+        #[cfg(any(feature = "native-tls-backend", feature = "rustls-backend"))] is_tls: bool,
     ) -> Self {
         let x_client_trust = config
             .x_client_allowed
@@ -71,6 +72,7 @@ impl<'a> Session<'a> {
 
         Self {
             authenticated: false,
+            #[cfg(any(feature = "native-tls-backend", feature = "rustls-backend"))]
             tls: is_tls,
             from: String::with_capacity(256),
             remote_name: String::with_capacity(256),
@@ -103,6 +105,7 @@ impl<'a> Session<'a> {
     }
 
     /// Returns `true` if the current session is encrypted (TLS active).
+    #[cfg(any(feature = "native-tls-backend", feature = "rustls-backend"))]
     #[inline]
     pub fn is_tls(&self) -> bool {
         self.tls
