@@ -60,7 +60,7 @@ pub async fn handle_client<T: SmtpHandlerFactory + Send + Sync + 'static>(
     >,
 ) -> std::result::Result<(), CoreError> {
     let remote_host = if !config.disable_reverse_dns {
-        get_remote_host(addr.ip(), &resolver).await
+        get_remote_host(addr.ip(), &resolver, config.timeout).await
     } else {
         "unknown".to_string()
     };
@@ -139,10 +139,10 @@ pub async fn handle_client<T: SmtpHandlerFactory + Send + Sync + 'static>(
                             }
                             Err(e) => {
                                 let res: Response = e.try_into()?;
-                                if !res.is_default() {
-                                    controller.write_response(&res).await?;
-                                    break;
-                                }
+                                controller.write_response(&res).await?;
+                                // A refused STARTTLS (syntax, already encrypted or
+                                // unsupported) leaves the current session intact.
+                                continue;
                             }
                         };
 
@@ -345,13 +345,47 @@ pub async fn handle_client<T: SmtpHandlerFactory + Send + Sync + 'static>(
                                     Err(_) => CoreError::Timeout,
                                     _ => unreachable!(),
                                 };
-                                let response: Response = error.try_into()?;
+                                let close = matches!(error, CoreError::Timeout | CoreError::Io);
+                                let response: Response = match error.try_into() {
+                                    Ok(response) => response,
+                                    Err(_) => break,
+                                };
                                 controller.write_response(&response).await?;
-                                break;
+                                if close {
+                                    break;
+                                }
                             }
                         }
                     }
                     "XCLIENT" => {
+                        // XCLIENT rewrites trusted peer metadata. Never acknowledge it
+                        // when the extension is unconfigured, the peer is outside the
+                        // allowlist or a mail transaction is already open.
+                        if session.smtp_config.x_client_allowed.is_none() {
+                            controller
+                                .write_response(&Response::not_implemented())
+                                .await?;
+                            continue;
+                        }
+                        if !session.x_client_trust {
+                            controller
+                                .write_response(&Response::new(
+                                    550,
+                                    "XCLIENT not permitted for this peer",
+                                    Some("5.7.1".into()),
+                                ))
+                                .await?;
+                            continue;
+                        }
+                        if session.got_from || !session.to.is_empty() {
+                            controller
+                                .write_response(&Response::bad_sequence(
+                                    "XCLIENT not permitted during a mail transaction",
+                                ))
+                                .await?;
+                            continue;
+                        }
+
                         session.x_client = args.unwrap_or_default().to_string();
 
                         if session.x_client_trust {
@@ -381,7 +415,12 @@ pub async fn handle_client<T: SmtpHandlerFactory + Send + Sync + 'static>(
                                     session.remote_host = session.x_client_name.to_owned();
                                 } else {
                                     if let Ok(ip) = IpAddr::from_str(&session.remote_ip) {
-                                        session.remote_host = get_remote_host(ip, &resolver).await;
+                                        session.remote_host = get_remote_host(
+                                            ip,
+                                            &resolver,
+                                            session.smtp_config.timeout,
+                                        )
+                                        .await;
                                     } else {
                                         session.remote_host = "unknown".to_string();
                                     }
@@ -420,12 +459,16 @@ pub async fn handle_client<T: SmtpHandlerFactory + Send + Sync + 'static>(
                                             .await?;
                                     }
                                     Err(e) => {
-                                        controller.write_response(&match e {
+                                        // A refused recipient is a per-recipient result:
+                                        // keep the transaction and connection usable for
+                                        // later RCPT commands. Only an explicit abort or an
+                                        // unwritable response closes the session.
+                                        let response = match e {
+                                            Error::Abort => break,
                                             Error::Response(res) if !res.is_default() => res,
-                                            _ => Response::Raw("550 5.1.0 Requested action not taken: mailbox unavailable"
-                                            .into()),
-                                        }).await?;
-                                        break;
+                                            _ => Response::Raw("550 5.1.0 Requested action not taken: mailbox unavailable".into()),
+                                        };
+                                        controller.write_response(&response).await?;
                                     }
                                 };
                             }
@@ -433,7 +476,8 @@ pub async fn handle_client<T: SmtpHandlerFactory + Send + Sync + 'static>(
                             Err(err) => {
                                 let res: Response = err.try_into()?;
                                 controller.write_response(&res).await?;
-                                break;
+                                // A malformed or over-limit RCPT leaves the already
+                                // accepted envelope available for a corrected command.
                             }
                         };
                     }

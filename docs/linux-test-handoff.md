@@ -13,3 +13,11 @@ ambiguous durable acceptance, public port25/DNS/TLS and actual gateway selected
 store/scanner/product/engine/restore pilot. Synthetic sink tests cannot close
 those release gates. Async cleanup is not guaranteed on task/process death;
 product receipt/grant expiry and reference-checked orphan recovery are mandatory.
+
+24 October admission checkpoint: repeat both locked suites after the per-IP
+admission and XCLIENT/RCPT/DATA/STARTTLS continuity changes (macOS45/43 total,
+all passing). Add Linux-specific evidence for per-IP saturation and fairness,
+reverse-DNS deadline under a hostile resolver, repeated STARTTLS and RCPT
+refusal under load, and process/task kill during DATA. Docker remains non-root,
+non-privileged and synthetic; it does not replace public port25/DNS/TLS,
+native-TLS or sustained host measurements.

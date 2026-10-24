@@ -26,3 +26,15 @@ No full-message Vec delivery or old callback compatibility remains. No product/
 provider/scanner/store traffic occurred. SMTPD-001 remains in progress: fuzz,
 full protocol coverage, native-TLS, sustained Linux target-host and combined
 GATE-002/004/005/006 acceptance still required. Linux CI now repeats both builds.
+
+24 October admission/continuity checkpoint: added per-IP connection admission
+with guarded release, removed the hardcoded30s reverse-DNS delay by threading
+the session deadline, and fixed false/unclean SMTP responses (unconfigured or
+untrusted XCLIENT, individually refused RCPT, transient DATA failure, repeated
+STARTTLS). Locked suites on macOS x86_64 with Rust1.99: rustls13 unit +21
+integration +11 doc; no-TLS13 +19 +11. Local pin1.97.1 is broken in this
+environment; CI remains authoritative for1.97.1. No product/store/scanner/DNS
+traffic occurred. SMTPD-001 stays open for fuzz/property coverage, native-TLS,
+sustained Linux RSS/CPU/fairness, public port25/DNS/TLS and combined
+GATE-002/004/005/006 acceptance. Source provenance with upstream SHA-256 hashes
+is recorded in docs/source-provenance.md.

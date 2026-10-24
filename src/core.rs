@@ -103,6 +103,8 @@ pub struct SmtpConfig {
     /// Maximum wire line bytes, including CRLF and SMTP dot transparency.
     pub max_line_bytes: usize,
     pub max_connections: usize,
+    /// Maximum concurrently admitted connections from one peer IP.
+    pub max_connections_per_ip: usize,
     pub max_tls_handshakes: usize,
     /// Absolute lifetime, including DNS, TLS and application callbacks.
     pub connection_timeout: Duration,
@@ -141,6 +143,7 @@ impl Default for SmtpConfig {
             max_recipients: 100,
             max_line_bytes: 1001,
             max_connections: 128,
+            max_connections_per_ip: 32,
             max_tls_handshakes: 16,
             connection_timeout: Duration::from_secs(900),
             transaction_timeout: Duration::from_secs(300),
@@ -253,8 +256,11 @@ impl SmtpConfig {
             || self.max_line_bytes > 65536
             || self.max_connections == 0
             || self.max_connections > tokio::sync::Semaphore::MAX_PERMITS
+            || self.max_connections_per_ip == 0
+            || self.max_connections_per_ip > self.max_connections
             || self.max_tls_handshakes == 0
             || self.max_tls_handshakes > self.max_connections
+            || (self.require_auth && self.auth_machs.is_empty())
             || self.timeout.is_zero()
             || self.connection_timeout.is_zero()
             || self.transaction_timeout.is_zero()

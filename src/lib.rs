@@ -81,7 +81,9 @@
 //! - `stream`: Connection stream abstraction with read/write helpers.
 //! - `utils`: Parsing and helper functions for SMTP commands.
 
-use std::sync::Arc;
+use std::collections::HashMap;
+use std::net::IpAddr;
+use std::sync::{Arc, Mutex};
 use tokio::net::TcpListener;
 use trust_dns_resolver::TokioAsyncResolver;
 use trust_dns_resolver::config::{ResolverConfig, ResolverOpts};
@@ -111,6 +113,28 @@ mod constants;
 mod core;
 mod handler;
 mod utils;
+
+/// Decrements the active count for one peer IP when the admitted session ends.
+/// Entries are removed at zero so spoofed/rotating clients cannot grow the map
+/// beyond the finite global admission limit.
+struct IpSlot {
+    counts: Arc<Mutex<HashMap<IpAddr, usize>>>,
+    ip: IpAddr,
+}
+
+impl Drop for IpSlot {
+    fn drop(&mut self) {
+        if let Ok(mut counts) = self.counts.lock() {
+            if let Some(active) = counts.get_mut(&self.ip) {
+                if *active <= 1 {
+                    counts.remove(&self.ip);
+                } else {
+                    *active -= 1;
+                }
+            }
+        }
+    }
+}
 
 /// Starts an SMTP server with the provided configuration and handler factory.
 ///
@@ -199,6 +223,7 @@ impl<T: SmtpHandlerFactory + Send + Sync + 'static> SmtpServer<T> {
             .unwrap_or_else(|_| (ResolverConfig::default(), ResolverOpts::default()));
         let resolver = Arc::new(TokioAsyncResolver::tokio(dns, opts));
         let connections = Arc::new(tokio::sync::Semaphore::new(config.max_connections));
+        let per_ip: Arc<Mutex<HashMap<IpAddr, usize>>> = Arc::new(Mutex::new(HashMap::new()));
         #[cfg(any(feature = "native-tls-backend", feature = "rustls-backend"))]
         let handshakes = Arc::new(tokio::sync::Semaphore::new(config.max_tls_handshakes));
         #[cfg(any(feature = "native-tls-backend", feature = "rustls-backend"))]
@@ -221,6 +246,20 @@ impl<T: SmtpHandlerFactory + Send + Sync + 'static> SmtpServer<T> {
                     let (stream, peer) = incoming?;
                     if tasks.len() >= config.max_connections { drop(stream); continue; }
                     let Ok(permit) = connections.clone().try_acquire_owned() else { drop(stream); continue; };
+                    let ip = peer.ip();
+                    {
+                        let mut counts = per_ip.lock().unwrap_or_else(|e| e.into_inner());
+                        let active = counts.entry(ip).or_insert(0);
+                        if *active >= config.max_connections_per_ip {
+                            if *active == 0 { counts.remove(&ip); }
+                            drop(counts);
+                            drop(permit);
+                            drop(stream);
+                            continue;
+                        }
+                        *active += 1;
+                    }
+                    let ip_slot = IpSlot { counts: per_ip.clone(), ip };
                     let config = config.clone();
                     let factory = self.handler.clone();
                     let resolver = resolver.clone();
@@ -230,6 +269,7 @@ impl<T: SmtpHandlerFactory + Send + Sync + 'static> SmtpServer<T> {
                     let handshakes = handshakes.clone();
                     tasks.spawn(async move {
                         let _permit = permit;
+                        let _ip_slot = ip_slot;
                         let lifetime = config.connection_timeout;
                         let _ = tokio::time::timeout(lifetime, async move {
                             #[cfg(any(feature = "native-tls-backend", feature = "rustls-backend"))]

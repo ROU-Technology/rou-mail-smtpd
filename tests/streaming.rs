@@ -15,6 +15,7 @@ use tokio::{
 struct Observed {
     chunks: Vec<Vec<u8>>,
     envelopes: Vec<(String, Vec<String>)>,
+    peers: Vec<(String, String)>,
     finishes: usize,
     aborts: usize,
     reset_envelopes: Vec<Vec<String>>,
@@ -47,12 +48,11 @@ impl SmtpHandler for Handler {
         Ok(())
     }
     async fn handle_data_start(&mut self, s: &Session<'_>) -> Result<(), Error> {
-        self.0
-            .state
-            .lock()
-            .unwrap()
-            .envelopes
-            .push((s.from.clone(), s.to.clone()));
+        let mut state = self.0.state.lock().unwrap();
+        state.envelopes.push((s.from.clone(), s.to.clone()));
+        state
+            .peers
+            .push((s.remote_ip.clone(), s.remote_host.clone()));
         Ok(())
     }
     async fn handle_data_chunk(&mut self, _: &Session<'_>, bytes: &[u8]) -> Result<(), Error> {
@@ -298,6 +298,7 @@ async fn connection_capacity_is_bounded_and_other_sessions_remain_usable() {
     use tokio::io::AsyncReadExt;
     let config = SmtpConfig {
         max_connections: 2,
+        max_connections_per_ip: 2,
         max_tls_handshakes: 2,
         ..Default::default()
     };
@@ -381,6 +382,7 @@ async fn invalid_and_stalled_tls_clients_cannot_stop_listener() {
     let config = SmtpConfig {
         tls_mode: smtpd::TlsMode::Implicit(smtpd::TlsConfig::Rustls(tls)),
         max_connections: 4,
+        max_connections_per_ip: 4,
         max_tls_handshakes: 3,
         timeout: Duration::from_secs(2),
         ..Default::default()
@@ -459,6 +461,20 @@ async fn refuses_zero_or_contradictory_budgets_before_listening() {
         },
         SmtpConfig {
             max_connections: 0,
+            ..Default::default()
+        },
+        SmtpConfig {
+            max_connections_per_ip: 0,
+            ..Default::default()
+        },
+        SmtpConfig {
+            max_connections: 2,
+            max_connections_per_ip: 3,
+            ..Default::default()
+        },
+        SmtpConfig {
+            require_auth: true,
+            auth_machs: vec![],
             ..Default::default()
         },
         SmtpConfig {
@@ -568,12 +584,389 @@ async fn starttls_discards_envelope_and_only_advertises_auth_after_encryption() 
     }
     assert!(capabilities.contains("AUTH PLAIN"));
     assert!(!capabilities.contains("STARTTLS"));
+    secured.get_mut().write_all(b"STARTTLS\r\n").await.unwrap();
+    let mut repeated = String::new();
+    secured.read_line(&mut repeated).await.unwrap();
+    assert!(repeated.starts_with("503"));
+    secured.get_mut().write_all(b"NOOP\r\n").await.unwrap();
+    let mut noop = String::new();
+    secured.read_line(&mut noop).await.unwrap();
+    assert!(noop.starts_with("250"));
     secured.get_mut().write_all(b"DATA\r\n").await.unwrap();
     let mut refusal = String::new();
     secured.read_line(&mut refusal).await.unwrap();
     assert!(refusal.starts_with("503"));
     assert_eq!(state.lock().unwrap().finishes, 0);
     drop(secured);
+    stop.send(()).unwrap();
+    task.await.unwrap().unwrap();
+}
+
+#[tokio::test]
+async fn per_ip_admission_is_bounded_and_released() {
+    use tokio::io::AsyncReadExt;
+    let config = SmtpConfig {
+        max_connections: 4,
+        max_connections_per_ip: 1,
+        max_tls_handshakes: 4,
+        ..Default::default()
+    };
+    let (port, stop, task, _) = start(config, false, false).await;
+    let first = connect(port).await;
+    let mut excess = TcpStream::connect(("127.0.0.1", port)).await.unwrap();
+    let mut byte = [0];
+    assert_eq!(
+        tokio::time::timeout(Duration::from_secs(1), excess.read(&mut byte))
+            .await
+            .unwrap()
+            .unwrap(),
+        0,
+        "a second connection from the same peer must be refused"
+    );
+    drop(first);
+    let mut admitted = None;
+    for _ in 0..50 {
+        tokio::time::sleep(Duration::from_millis(10)).await;
+        if let Ok(stream) = TcpStream::connect(("127.0.0.1", port)).await {
+            let mut reader = BufReader::new(stream);
+            let mut greeting = String::new();
+            if tokio::time::timeout(Duration::from_millis(200), reader.read_line(&mut greeting))
+                .await
+                .is_ok()
+                && greeting.starts_with("220 ")
+            {
+                admitted = Some(reader);
+                break;
+            }
+        }
+    }
+    let mut admitted = admitted.expect("peer slot must be released when the session ends");
+    assert!(command(&mut admitted, b"NOOP\r\n").await.starts_with("250"));
+    drop(admitted);
+    drop(excess);
+    stop.send(()).unwrap();
+    task.await.unwrap().unwrap();
+}
+
+#[tokio::test]
+async fn data_chunks_are_delivered_before_the_terminator() {
+    let (port, stop, task, state) = start(SmtpConfig::default(), false, false).await;
+    let mut client = connect(port).await;
+    envelope(&mut client).await;
+    assert!(command(&mut client, b"DATA\r\n").await.starts_with("354"));
+    client
+        .get_mut()
+        .write_all(b"first-chunk\r\n")
+        .await
+        .unwrap();
+    let mut seen = false;
+    for _ in 0..100 {
+        tokio::time::sleep(Duration::from_millis(5)).await;
+        if state.lock().unwrap().chunks.concat() == b"first-chunk\r\n" {
+            seen = true;
+            break;
+        }
+    }
+    assert!(
+        seen,
+        "DATA must stream to the sink without buffering the whole message"
+    );
+    assert!(command(&mut client, b".\r\n").await.starts_with("250"));
+    assert_eq!(state.lock().unwrap().finishes, 1);
+    drop(client);
+    stop.send(()).unwrap();
+    task.await.unwrap().unwrap();
+}
+
+#[tokio::test]
+async fn oversized_command_line_is_refused_before_growth() {
+    let config = SmtpConfig {
+        max_line_bytes: 64,
+        ..Default::default()
+    };
+    let (port, stop, task, _) = start(config, false, false).await;
+    let mut client = connect(port).await;
+    let mut command_line = b"MAIL FROM:<".to_vec();
+    command_line.extend(std::iter::repeat(b'x').take(256));
+    command_line.extend_from_slice(b">\r\n");
+    assert!(command(&mut client, &command_line).await.starts_with("552"));
+    let mut fresh = connect(port).await;
+    assert!(command(&mut fresh, b"NOOP\r\n").await.starts_with("250"));
+    drop(client);
+    drop(fresh);
+    stop.send(()).unwrap();
+    task.await.unwrap().unwrap();
+}
+
+#[tokio::test]
+async fn oversized_data_line_aborts_without_finalising() {
+    let config = SmtpConfig {
+        max_line_bytes: 32,
+        max_message_size: 1024,
+        ..Default::default()
+    };
+    let (port, stop, task, state) = start(config, false, false).await;
+    let mut client = connect(port).await;
+    envelope(&mut client).await;
+    assert!(command(&mut client, b"DATA\r\n").await.starts_with("354"));
+    let mut line = vec![b'y'; 100];
+    line.extend_from_slice(b"\r\n.\r\n");
+    assert!(!command(&mut client, &line).await.starts_with("250"));
+    assert_eq!(state.lock().unwrap().finishes, 0);
+    assert_eq!(state.lock().unwrap().aborts, 1);
+    drop(client);
+    stop.send(()).unwrap();
+    task.await.unwrap().unwrap();
+}
+
+#[tokio::test]
+async fn xclient_is_refused_when_unconfigured_or_untrusted() {
+    let (port, stop, task, _) = start(SmtpConfig::default(), false, false).await;
+    let mut client = connect(port).await;
+    assert!(
+        command(&mut client, b"EHLO x.example\r\n")
+            .await
+            .starts_with("250")
+    );
+    assert!(
+        command(&mut client, b"XCLIENT ADDR=203.0.113.9\r\n")
+            .await
+            .starts_with("502")
+    );
+    drop(client);
+    stop.send(()).unwrap();
+    task.await.unwrap().unwrap();
+
+    let config = SmtpConfig {
+        x_client_allowed: Some(vec!["10.0.0.1".into()]),
+        ..Default::default()
+    };
+    let (port, stop, task, _) = start(config, false, false).await;
+    let mut client = connect(port).await;
+    assert!(
+        command(&mut client, b"EHLO x.example\r\n")
+            .await
+            .starts_with("250")
+    );
+    assert!(
+        command(&mut client, b"XCLIENT ADDR=203.0.113.9\r\n")
+            .await
+            .starts_with("550")
+    );
+    assert!(
+        command(&mut client, b"MAIL FROM:<>\r\n")
+            .await
+            .starts_with("250")
+    );
+    drop(client);
+    stop.send(()).unwrap();
+    task.await.unwrap().unwrap();
+}
+
+#[tokio::test]
+async fn trusted_xclient_applies_peer_metadata_only_before_a_transaction() {
+    let config = SmtpConfig {
+        x_client_allowed: Some(vec!["127.0.0.1".into()]),
+        ..Default::default()
+    };
+    let (port, stop, task, state) = start(config, false, false).await;
+    let mut client = connect(port).await;
+    assert!(
+        command(&mut client, b"EHLO x.example\r\n")
+            .await
+            .starts_with("250")
+    );
+    assert!(
+        command(
+            &mut client,
+            b"XCLIENT ADDR=203.0.113.9 NAME=mail.example\r\n"
+        )
+        .await
+        .starts_with("250")
+    );
+    assert!(
+        command(&mut client, b"MAIL FROM:<sender@example.org>\r\n")
+            .await
+            .starts_with("250")
+    );
+    assert!(
+        command(&mut client, b"XCLIENT ADDR=198.51.100.1\r\n")
+            .await
+            .starts_with("503")
+    );
+    assert!(
+        command(&mut client, b"RCPT TO:<receiver@example.org>\r\n")
+            .await
+            .starts_with("250")
+    );
+    assert!(command(&mut client, b"DATA\r\n").await.starts_with("354"));
+    assert!(
+        command(&mut client, b"body\r\n.\r\n")
+            .await
+            .starts_with("250")
+    );
+    let observed = state.lock().unwrap();
+    assert_eq!(
+        observed.peers,
+        [("203.0.113.9".to_string(), "mail.example".to_string())]
+    );
+    drop(observed);
+    drop(client);
+    stop.send(()).unwrap();
+    task.await.unwrap().unwrap();
+}
+
+#[tokio::test]
+async fn refused_recipient_does_not_close_the_transaction() {
+    struct Selective;
+    #[async_trait]
+    impl SmtpHandler for Selective {
+        async fn handle_rcpt(&mut self, _: &Session<'_>, to: &str) -> smtpd::Result {
+            if to == "unknown@example.org" {
+                Err(Error::Response(Response::new(
+                    550,
+                    "No such mailbox",
+                    Some("5.1.1".into()),
+                )))
+            } else {
+                Ok(Response::default())
+            }
+        }
+        async fn handle_data_start(&mut self, _: &Session<'_>) -> Result<(), Error> {
+            Ok(())
+        }
+        async fn handle_data_chunk(&mut self, _: &Session<'_>, _: &[u8]) -> Result<(), Error> {
+            Ok(())
+        }
+        async fn handle_data_end(&mut self, _: &Session<'_>) -> smtpd::Result {
+            Ok(Response::ok("Accepted"))
+        }
+    }
+    struct SelectiveFactory;
+    impl SmtpHandlerFactory for SelectiveFactory {
+        type Handler = Selective;
+        fn new_handler(&self, _: &Session<'_>) -> Selective {
+            Selective
+        }
+    }
+    let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let port = listener.local_addr().unwrap().port();
+    let (stop, signal) = oneshot::channel();
+    let config = SmtpConfig {
+        disable_reverse_dns: true,
+        ..Default::default()
+    };
+    let task = tokio::spawn(SmtpServer::new(config, SelectiveFactory).serve_until(
+        listener,
+        async {
+            let _ = signal.await;
+        },
+    ));
+    let mut client = connect(port).await;
+    assert!(
+        command(&mut client, b"EHLO test.example\r\n")
+            .await
+            .starts_with("250")
+    );
+    assert!(
+        command(&mut client, b"MAIL FROM:<>\r\n")
+            .await
+            .starts_with("250")
+    );
+    assert!(
+        command(&mut client, b"RCPT TO:<unknown@example.org>\r\n")
+            .await
+            .starts_with("550")
+    );
+    assert!(
+        command(&mut client, b"RCPT TO:<known@example.org>\r\n")
+            .await
+            .starts_with("250")
+    );
+    assert!(command(&mut client, b"DATA\r\n").await.starts_with("354"));
+    assert!(
+        command(&mut client, b"body\r\n.\r\n")
+            .await
+            .starts_with("250")
+    );
+    drop(client);
+    stop.send(()).unwrap();
+    task.await.unwrap().unwrap();
+}
+
+#[tokio::test]
+async fn temporary_data_failure_resets_and_allows_a_retry() {
+    use std::sync::atomic::{AtomicUsize, Ordering};
+    struct Retrying(Arc<AtomicUsize>);
+    #[async_trait]
+    impl SmtpHandler for Retrying {
+        async fn handle_rcpt(&mut self, _: &Session<'_>, _: &str) -> smtpd::Result {
+            Ok(Response::default())
+        }
+        async fn handle_data_start(&mut self, _: &Session<'_>) -> Result<(), Error> {
+            Ok(())
+        }
+        async fn handle_data_chunk(&mut self, _: &Session<'_>, _: &[u8]) -> Result<(), Error> {
+            Ok(())
+        }
+        async fn handle_data_end(&mut self, _: &Session<'_>) -> smtpd::Result {
+            if self.0.fetch_add(1, Ordering::SeqCst) == 0 {
+                Err(Error::Response(Response::new(
+                    451,
+                    "Storage temporarily unavailable",
+                    Some("4.3.0".into()),
+                )))
+            } else {
+                Ok(Response::ok("Accepted"))
+            }
+        }
+    }
+    struct RetryingFactory(Arc<AtomicUsize>);
+    impl SmtpHandlerFactory for RetryingFactory {
+        type Handler = Retrying;
+        fn new_handler(&self, _: &Session<'_>) -> Retrying {
+            Retrying(self.0.clone())
+        }
+    }
+    let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let port = listener.local_addr().unwrap().port();
+    let (stop, signal) = oneshot::channel();
+    let config = SmtpConfig {
+        disable_reverse_dns: true,
+        ..Default::default()
+    };
+    let attempts = Arc::new(AtomicUsize::new(0));
+    let task = tokio::spawn(
+        SmtpServer::new(config, RetryingFactory(attempts.clone())).serve_until(listener, async {
+            let _ = signal.await;
+        }),
+    );
+    let mut client = connect(port).await;
+    envelope(&mut client).await;
+    assert!(command(&mut client, b"DATA\r\n").await.starts_with("354"));
+    assert!(
+        command(&mut client, b"first\r\n.\r\n")
+            .await
+            .starts_with("451")
+    );
+    assert!(
+        command(&mut client, b"MAIL FROM:<>\r\n")
+            .await
+            .starts_with("250")
+    );
+    assert!(
+        command(&mut client, b"RCPT TO:<receiver@example.org>\r\n")
+            .await
+            .starts_with("250")
+    );
+    assert!(command(&mut client, b"DATA\r\n").await.starts_with("354"));
+    assert!(
+        command(&mut client, b"second\r\n.\r\n")
+            .await
+            .starts_with("250")
+    );
+    assert_eq!(attempts.load(Ordering::SeqCst), 2);
+    drop(client);
     stop.send(()).unwrap();
     task.await.unwrap().unwrap();
 }

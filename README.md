@@ -92,21 +92,27 @@ Read [the complete supplied-library map](https://github.com/ROU-Technology/email
 ## Current fork API: bounded streaming receipt
 
 This unreleased fork replaces full-message handle_email/Vec delivery with one
-streaming contract: handle_data_start prepares an authorised sink before354;
-handle_data_chunk consumes exact dot-unstuffed bytes with backpressure;
-handle_data_end confirms durable acceptance before250. Default recipient/DATA
-hooks refuse. handle_data_abort and handle_reset clean up transient state only;
-never delete an accepted/possibly committed original. Process death/cancellation
-can skip async hooks, so durable recovery belongs to the product authority.
-No old callback adapter or buffering fallback is retained.
+streaming contract: handle_data_start prepares an authorised sink before the
+354 reply; handle_data_chunk consumes exact dot-unstuffed bytes with
+backpressure; handle_data_end confirms durable acceptance before the final 250.
+Default recipient/DATA hooks refuse. handle_data_abort and handle_reset clean up
+transient state only; never delete an accepted/possibly committed original.
+Process death/cancellation can skip async hooks, so durable recovery belongs to
+the product authority. No old callback adapter or buffering fallback is retained.
 
 SmtpConfig requires positive finite message/line/recipient/connection/handshake
 limits and I/O, DATA, connection and shutdown deadlines. max_message_size is
-mandatory usize; None/unlimited mode was removed. serve_until accepts a prebound
-Tokio listener and a shutdown future for bounded admission/draining. TLS
-handshakes run in separately budgeted session tasks; failure cannot panic/block
-the accept loop. AUTH is hidden/refused before TLS. STARTTLS creates fresh
-session/handler state. Lines require exact CRLF; no newline repair before DKIM.
+mandatory usize; None/unlimited mode was removed. max_connections_per_ip and
+max_tls_handshakes are independently bounded and may not exceed
+max_connections. serve_until accepts a prebound Tokio listener and a shutdown
+future for bounded admission/draining. TLS handshakes run in separately
+budgeted session tasks; failure cannot panic/block the accept loop. Reverse DNS
+uses the remaining session deadline rather than a fixed delay. AUTH is hidden/
+refused before TLS. STARTTLS creates fresh session/handler state and a refused
+repeat returns503 without ending the session. A single refused RCPT or a
+transient non-transport DATA failure keeps the session and resets state. XCLIENT
+is refused unless configured and trusted, and cannot alter an active
+transaction. Lines require exact CRLF; no newline repair before DKIM.
 The library does not perform DNS authentication/scanning, store messages, commit
 product receipts or authorise relay recipients by itself.
 

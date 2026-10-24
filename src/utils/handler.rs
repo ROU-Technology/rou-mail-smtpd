@@ -419,18 +419,23 @@ pub fn validate_data(session: &Session<'_>) -> std::result::Result<(), Error> {
 }
 
 /// Performs a reverse DNS lookup for the given IP address using the provided resolver.
+/// The lookup is bounded by the caller's session timeout rather than a hidden
+/// fixed delay, so a slow resolver cannot hold the greeting or command loop open.
 /// Returns the first resolved hostname as a `String`, or `"unknown"` if the lookup fails or times out.
 ///
 /// # Parameters
 /// - `ip`: The IP address to resolve.
 /// - `resolver`: A reference to a `TokioAsyncResolver` instance.
+/// - `deadline`: Maximum time spent waiting for the resolver.
 ///
 /// # Returns
 /// A `String` representing the resolved hostname, or `"unknown"` if lookup fails.
-pub async fn get_remote_host(ip: IpAddr, resolver: &TokioAsyncResolver) -> String {
-    const TIMEOUT: Duration = Duration::from_secs(30);
-
-    match timeout(TIMEOUT, resolver.reverse_lookup(ip)).await {
+pub async fn get_remote_host(
+    ip: IpAddr,
+    resolver: &TokioAsyncResolver,
+    deadline: Duration,
+) -> String {
+    match timeout(deadline, resolver.reverse_lookup(ip)).await {
         Ok(Ok(lookup)) => lookup
             .iter()
             .next()
