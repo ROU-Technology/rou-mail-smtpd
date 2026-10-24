@@ -1,0 +1,14 @@
+name: SMTP fork baseline
+on: [push, pull_request]
+permissions:
+  contents: read
+jobs:
+  test:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@master
+        with:
+          toolchain: 1.97.1
+      - run: cargo test --locked --features rustls-backend
+      - run: python3 scripts/build-plan.py --check
