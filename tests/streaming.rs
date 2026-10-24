@@ -442,6 +442,14 @@ async fn invalid_and_stalled_tls_clients_cannot_stop_listener() {
 async fn refuses_zero_or_contradictory_budgets_before_listening() {
     for config in [
         SmtpConfig {
+            max_connections: usize::MAX,
+            ..Default::default()
+        },
+        SmtpConfig {
+            connection_timeout: Duration::MAX,
+            ..Default::default()
+        },
+        SmtpConfig {
             max_message_size: 0,
             ..Default::default()
         },

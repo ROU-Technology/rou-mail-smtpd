@@ -252,12 +252,21 @@ impl SmtpConfig {
             || self.max_line_bytes < 2
             || self.max_line_bytes > 65536
             || self.max_connections == 0
+            || self.max_connections > tokio::sync::Semaphore::MAX_PERMITS
             || self.max_tls_handshakes == 0
             || self.max_tls_handshakes > self.max_connections
             || self.timeout.is_zero()
             || self.connection_timeout.is_zero()
             || self.transaction_timeout.is_zero()
             || self.shutdown_timeout.is_zero()
+            || [
+                self.timeout,
+                self.connection_timeout,
+                self.transaction_timeout,
+                self.shutdown_timeout,
+            ]
+            .iter()
+            .any(|d| tokio::time::Instant::now().checked_add(*d).is_none())
             || self.timeout > self.connection_timeout
             || self.transaction_timeout > self.connection_timeout
             || self.hostname.is_empty()

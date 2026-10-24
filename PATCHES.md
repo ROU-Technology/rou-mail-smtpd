@@ -38,3 +38,9 @@ receipt/scanner acceptance remain open. No production readiness is asserted.
 Reversal: stop new listener admission and drain first. Preserve caller-owned
 accepted/unknown receipt/store identities; never restore a buffering compatibility
 shim or automatically replay external SMTP on downgrade.
+
+Follow-up in the same checkpoint: reject semaphore permit overflow and deadline
+Instant overflow during configuration validation (regression cases included).
+Write the confirmed end result before calling transient reset cleanup so that
+cleanup failure cannot suppress an already confirmed durable acceptance reply.
+The final37/35 test suites pass unchanged in scope.

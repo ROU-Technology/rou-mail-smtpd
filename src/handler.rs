@@ -324,7 +324,6 @@ pub async fn handle_client<T: SmtpHandlerFactory + Send + Sync + 'static>(
                         .await;
                         match result {
                             Ok(Ok(response)) => {
-                                reset_transaction(&mut session, &mut handler).await?;
                                 controller
                                     .write_response(&if response.is_default() {
                                         Response::ok("Accepted")
@@ -332,6 +331,7 @@ pub async fn handle_client<T: SmtpHandlerFactory + Send + Sync + 'static>(
                                         response
                                     })
                                     .await?;
+                                reset_transaction(&mut session, &mut handler).await?;
                             }
                             failed => {
                                 let _ = tokio::time::timeout(
