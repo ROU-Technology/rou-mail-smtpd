@@ -23,7 +23,7 @@ struct MyHandler {}
 impl smtpd::SmtpHandler for MyHandler {
     async fn handle_auth(
         &mut self,
-        _session: &smtpd::Session,
+        _session: &smtpd::Session<'_>,
         data: smtpd::AuthData,
     ) -> Result<smtpd::Response, smtpd::Error> {
         let (username, password, _) = data.data();
@@ -37,7 +37,7 @@ impl smtpd::SmtpHandler for MyHandler {
 
     async fn handle_rcpt(
         &mut self,
-        _session: &smtpd::Session,
+        _session: &smtpd::Session<'_>,
         to: &str,
     ) -> Result<smtpd::Response, smtpd::Error> {
         // allow recipients only from gmail
@@ -54,7 +54,7 @@ struct MyHandlerFactory;
 impl smtpd::SmtpHandlerFactory for MyHandlerFactory {
     type Handler = MyHandler;
 
-    fn new_handler(&self, _session: &smtpd::Session) -> Self::Handler {
+    fn new_handler(&self, _session: &smtpd::Session<'_>) -> Self::Handler {
         MyHandler {}
     }
 }

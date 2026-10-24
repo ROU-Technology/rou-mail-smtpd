@@ -67,7 +67,7 @@ impl AuthMach {
 /// impl SmtpHandler for MyHandler {
 ///     async fn handle_auth(
 ///         &mut self,
-///         _session: &Session,
+///         _session: &Session<'_>,
 ///         data: AuthData,
 ///     ) -> Result {
 ///         let (username, password, _) = data.data();

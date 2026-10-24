@@ -173,7 +173,7 @@ impl TlsProvider {
 /// let der: Vec<u8> = vec![];
 /// let identity = smtpd::Identity::from_pkcs12(der.as_slice(), "password").unwrap();
 /// let tls_config = TlsConfig::NativeTls(identity);
-/// 
+///
 /// // opportunistic tls
 /// let mode = TlsMode::Explicit(tls_config.clone());
 ///

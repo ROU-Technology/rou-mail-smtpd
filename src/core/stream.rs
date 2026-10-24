@@ -27,6 +27,7 @@ pub(crate) struct StreamController {
 
     /// Timeout duration applied to each read/write operation.
     timeout: core::time::Duration,
+    line_limit: usize,
 }
 
 impl Into<ConnectionStream> for StreamController {
@@ -51,6 +52,7 @@ impl StreamController {
             #[cfg(any(feature = "native-tls-backend", feature = "rustls-backend"))]
             is_tls,
             timeout,
+            line_limit: 1001,
         }
     }
 
@@ -75,88 +77,76 @@ impl StreamController {
         self.write_line(&res.to_string()).await
     }
 
-    /// Reads a line from the connection and trims leading and trailing whitespace.
-    ///
-    /// Timeout applies to the read operation.
-    pub async fn read_line_trimmed(&mut self, dist: &mut String) -> Result<(), Error> {
-        timeout(self.timeout, self.reader.read_line(dist)).await??;
+    pub fn set_line_limit(&mut self, limit: usize) {
+        self.line_limit = limit;
+    }
 
-        // Trim leading whitespace
-        let start_len_diff = dist.len() - dist.trim_start().len();
-        if start_len_diff > 0 {
-            dist.drain(0..start_len_diff);
-        }
+    /// Read one strict CRLF line. Check the bound before growing the buffer.
+    /// A single timeout covers the whole read, including a dripping sender.
+    pub async fn read_line_crlf(&mut self, buffer: &mut Vec<u8>) -> Result<(), Error> {
+        buffer.clear();
+        let limit = self.line_limit;
+        timeout(self.timeout, async {
+            loop {
+                let available = self.reader.fill_buf().await?;
+                if available.is_empty() {
+                    return Err(Error::Io);
+                }
+                let end = available.iter().position(|b| *b == b'\n');
+                let take = end.map_or(available.len(), |i| i + 1);
+                if take > limit.saturating_sub(buffer.len()) {
+                    return Err(Error::MaxSizeExceeded { limit });
+                }
+                buffer.extend_from_slice(&available[..take]);
+                self.reader.consume(take);
+                if end.is_some() {
+                    if !buffer.ends_with(b"\r\n") || buffer[..buffer.len() - 2].contains(&b'\r') {
+                        return Err(Error::InvalidLineEnding);
+                    }
+                    return Ok(());
+                }
+            }
+        })
+        .await?
+    }
 
-        // Trim trailing whitespace
-        let end_trimmed = dist.trim_end().len();
-        if end_trimmed < dist.len() {
-            dist.truncate(end_trimmed);
-        }
-
+    pub async fn read_line_trimmed(&mut self, target: &mut String) -> Result<(), Error> {
+        let mut bytes = Vec::new();
+        self.read_line_crlf(&mut bytes).await?;
+        let line = std::str::from_utf8(&bytes).map_err(|_| Error::InvalidLineEnding)?;
+        target.clear();
+        target.push_str(line.trim());
         Ok(())
     }
 
-    /// Reads a line from the connection, ensuring proper CRLF line ending.
-    ///
-    /// If the line ends with LF only, it converts it to CRLF.
-    /// Returns `Error::InvalidLineEnding` for malformed lines.
-    pub async fn read_line_crlf(&mut self, buffer: &mut Vec<u8>) -> Result<(), Error> {
-        timeout(self.timeout, self.reader.read_until(b'\n', buffer)).await??;
-
-        if buffer.ends_with(b"\r\n") {
-            Ok(())
-        } else if buffer.ends_with(b"\n") {
-            // Convert LF to CRLF if needed
-            buffer.pop(); // remove LF
-            if buffer.ends_with(b"\r") {
-                buffer.push(b'\n'); // already CR present, just append LF
-                Ok(())
-            } else {
-                buffer.push(b'\r');
-                buffer.push(b'\n');
-                Ok(())
-            }
-        } else {
-            Err(Error::InvalidLineEnding)
-        }
-    }
-
-    /// Reads the data of an SMTP `DATA` command until a line containing only `.`.
-    ///
-    /// Handles dot-stuffing (lines starting with `.`) and enforces an optional maximum size.
-    pub async fn read_mail_data(&mut self, max_size: Option<usize>) -> Result<Vec<u8>, Error> {
-        let mut data = vec![];
-        let mut line = vec![];
-        let mut total_size = 0;
-
+    /// Bounded, backpressured DATA delivery; no full-message Vec or newline repair.
+    pub async fn stream_mail_data<H: crate::SmtpHandler>(
+        &mut self,
+        max_size: usize,
+        session: &crate::Session<'_>,
+        handler: &mut H,
+    ) -> Result<(), Error> {
+        let mut line = Vec::new();
+        let mut total = 0usize;
         loop {
-            line.clear();
             self.read_line_crlf(&mut line).await?;
-
-            // End of data marker
             if line == b".\r\n" {
-                break;
+                return Ok(());
             }
-
-            // Handle dot-stuffing
-            let processed_line = if line.starts_with(b".") {
+            let chunk = if line.starts_with(b".") {
                 &line[1..]
             } else {
-                &line
+                &line[..]
             };
-
-            // Check max size
-            if let Some(max) = max_size {
-                if total_size + processed_line.len() > max {
-                    return Err(Error::MaxSizeExceeded { limit: max });
-                }
-            }
-
-            data.extend_from_slice(processed_line);
-            total_size += processed_line.len();
+            total = total
+                .checked_add(chunk.len())
+                .filter(|n| *n <= max_size)
+                .ok_or(Error::MaxSizeExceeded { limit: max_size })?;
+            handler
+                .handle_data_chunk(session, chunk)
+                .await
+                .map_err(Error::Handler)?;
         }
-
-        Ok(data)
     }
 }
 
@@ -264,71 +254,40 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn read_line_crlf_can_fix_broken_lf() {
+    async fn rejects_bare_lf_without_rewriting_bytes() {
         let (mut client, server) = create_tcp_pair().await;
         let mut controller = StreamController::new(server, TIMEOUT);
-
-        // send request
-        tokio::spawn(async move { client.write_all(b"ping\n").await.unwrap() });
-
+        client.write_all(b"ping\n").await.unwrap();
         let mut buf = vec![];
-        controller.read_line_crlf(&mut buf).await.unwrap();
-
-        assert_eq!(buf, b"ping\r\n");
-    }
-
-    #[tokio::test]
-    async fn read_mail_data() {
-        let (mut client, server) = create_tcp_pair().await;
-        let mut controller = StreamController::new(server, TIMEOUT);
-
-        // send request
-        tokio::spawn(async move {
-            client.write_all(b"start\n").await.unwrap();
-            client.write_all(b".end\n").await.unwrap();
-            client.write_all(b".\n").await.unwrap()
-        });
-
-        let buf = controller.read_mail_data(Some(1024)).await.unwrap();
-
-        assert_eq!(buf, b"start\r\nend\r\n");
-    }
-
-    #[tokio::test]
-    async fn read_mail_data_max_size_err() {
-        let (mut client, server) = create_tcp_pair().await;
-        let mut controller = StreamController::new(server, TIMEOUT);
-
-        // send request
-        tokio::spawn(async move {
-            client.write_all(b"start\n").await.unwrap();
-            client.write_all(b".end\r\n").await.unwrap();
-            client.write_all(b".\n").await.unwrap()
-        });
-
-        let res = controller.read_mail_data(Some(1)).await;
-
-        assert!(res.is_err());
         assert!(matches!(
-            res.err(),
-            Some(Error::MaxSizeExceeded { limit: 1 })
+            controller.read_line_crlf(&mut buf).await,
+            Err(Error::InvalidLineEnding)
         ));
+        assert_eq!(buf, b"ping\n");
     }
 
     #[tokio::test]
-    async fn timeout() {
+    async fn bounds_unterminated_line_before_allocation() {
         let (mut client, server) = create_tcp_pair().await;
-        let mut controller = StreamController::new(server, Duration::from_micros(0));
+        let mut controller = StreamController::new(server, TIMEOUT);
+        controller.set_line_limit(32);
+        client.write_all(&[b'x'; 4096]).await.unwrap();
+        let mut buf = vec![];
+        assert!(matches!(
+            controller.read_line_crlf(&mut buf).await,
+            Err(Error::MaxSizeExceeded { limit: 32 })
+        ));
+        assert!(buf.len() <= 32);
+    }
 
-        tokio::spawn(async move {
-            // Just keep the connection open but never write
-            tokio::time::sleep(Duration::from_secs(5)).await;
-            let _ = client.shutdown().await;
-        });
-
-        let res = controller.read_mail_data(Some(1)).await;
-
-        assert!(res.is_err());
-        assert!(matches!(res.err(), Some(Error::Timeout)));
+    #[tokio::test]
+    async fn eof_is_terminal() {
+        let (client, server) = create_tcp_pair().await;
+        drop(client);
+        let mut controller = StreamController::new(server, TIMEOUT);
+        assert!(matches!(
+            controller.read_line_crlf(&mut vec![]).await,
+            Err(Error::Io)
+        ));
     }
 }

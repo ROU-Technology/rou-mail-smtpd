@@ -17,3 +17,12 @@ canonical GitHub bodies were verified against current source; issue state/histor
 was preserved. Source generation and whitespace checks passed. This increment
 changes planning/docs only; no runtime test, DNS, send or deployment occurred.
 Previous dependency/build CI does not satisfy these new feature acceptance gates.
+
+
+24 October runtime checkpoint: bounded streaming SMTP and supervised TCP/TLS
+implemented and tested; see PATCHES.md. Local rustls37 total tests and no-TLS35
+total tests pass, including real sockets and ephemeral in-memory certificates.
+No full-message Vec delivery or old callback compatibility remains. No product/
+provider/scanner/store traffic occurred. SMTPD-001 remains in progress: fuzz,
+full protocol coverage, native-TLS, sustained Linux target-host and combined
+GATE-002/004/005/006 acceptance still required. Linux CI now repeats both builds.

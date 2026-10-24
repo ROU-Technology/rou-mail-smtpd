@@ -50,7 +50,7 @@ pub mod tls;
 /// impl SmtpHandlerFactory for MyHandlerFactory {
 ///     type Handler = MyHandler;
 ///
-///     fn new_handler(&self, _session: &Session) -> Self::Handler {
+///     fn new_handler(&self, _session: &Session<'_>) -> Self::Handler {
 ///         MyHandler
 ///     }
 /// }
@@ -65,7 +65,7 @@ pub mod tls;
 /// - **`tls_mode`** — TLS behavior mode for the server.  
 ///   See [`TlsMode`] for supported options (e.g., `Disabled`, `Explicit`, `Required`, `Implicit`).
 /// - **`max_message_size`** — Maximum allowed message size in bytes.  
-///   If `None`, message size limits are not enforced.
+///   Must be positive; unlimited input is not supported.
 /// - **`max_recipients`** — Maximum number of recipients per message.  
 ///   Defaults to **100**, as recommended by RFC 5321.
 /// - **`timeout`** — Timeout duration for individual read/write operations  
@@ -96,10 +96,19 @@ pub struct SmtpConfig {
     pub tls_mode: TlsMode,
 
     /// Maximum allowed message size in bytes.
-    pub max_message_size: Option<usize>,
+    pub max_message_size: usize,
 
     /// Maximum number of recipients per message. Defaults to 100.
     pub max_recipients: usize,
+    /// Maximum wire line bytes, including CRLF and SMTP dot transparency.
+    pub max_line_bytes: usize,
+    pub max_connections: usize,
+    pub max_tls_handshakes: usize,
+    /// Absolute lifetime, including DNS, TLS and application callbacks.
+    pub connection_timeout: Duration,
+    /// Absolute DATA streaming and finalisation deadline.
+    pub transaction_timeout: Duration,
+    pub shutdown_timeout: Duration,
 
     /// Timeout duration for individual read/write operations.
     pub timeout: Duration,
@@ -127,9 +136,15 @@ impl Default for SmtpConfig {
             bind_addr: "127.0.0.1:25".to_string(),
             appname: "smtpd-rs".to_string(),
             hostname,
-            max_message_size: Some(10 * 1024 * 1024), // 10MB
-            timeout: Duration::from_secs(300),        // 5M
+            max_message_size: 10 * 1024 * 1024, // 10MB
+            timeout: Duration::from_secs(300),  // 5M
             max_recipients: 100,
+            max_line_bytes: 1001,
+            max_connections: 128,
+            max_tls_handshakes: 16,
+            connection_timeout: Duration::from_secs(900),
+            transaction_timeout: Duration::from_secs(300),
+            shutdown_timeout: Duration::from_secs(10),
             auth_machs: vec![],
             require_auth: false,
             disable_reverse_dns: false,
@@ -227,5 +242,37 @@ impl ConnectionStream {
             Self::Rustls(_) => true,
             Self::Tcp(_) => false,
         }
+    }
+}
+
+impl SmtpConfig {
+    pub(crate) fn validate(&self) -> std::io::Result<()> {
+        if self.max_message_size == 0
+            || self.max_recipients == 0
+            || self.max_line_bytes < 2
+            || self.max_line_bytes > 65536
+            || self.max_connections == 0
+            || self.max_tls_handshakes == 0
+            || self.max_tls_handshakes > self.max_connections
+            || self.timeout.is_zero()
+            || self.connection_timeout.is_zero()
+            || self.transaction_timeout.is_zero()
+            || self.shutdown_timeout.is_zero()
+            || self.timeout > self.connection_timeout
+            || self.transaction_timeout > self.connection_timeout
+            || self.hostname.is_empty()
+            || self.appname.is_empty()
+            || self
+                .hostname
+                .chars()
+                .chain(self.appname.chars())
+                .any(|c| c.is_control())
+        {
+            return Err(std::io::Error::new(
+                std::io::ErrorKind::InvalidInput,
+                "Invalid finite SMTP limits or greeting",
+            ));
+        }
+        Ok(())
     }
 }

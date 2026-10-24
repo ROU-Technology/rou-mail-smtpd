@@ -1,6 +1,6 @@
 # SMTPD-001: Harden the pinned async SMTP protocol library for the hosted gateway
 
-Status: **planned**. Phase: **HNR**. Product advancement: HNR-05.
+Status: **in progress**. Phase: **HNR**. Product advancement: HNR-05.
 
 Implementation acceptance remains unproven.
 
