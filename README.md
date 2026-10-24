@@ -82,3 +82,8 @@ impl smtpd::SmtpHandlerFactory for MyHandlerFactory {
 - `tls`: TLS configuration and provider utilities.
 - `stream`: Connection stream abstraction with read/write helpers.
 - `utils`: Parsing and helper functions for SMTP commands.
+
+
+## Complete cross-repository library coverage
+
+Read [the complete supplied-library map](https://github.com/ROU-Technology/email/blob/codex/product-engine-alignment/docs/product-plan/advancements/library-integration-map.md) and [direct receiving contract](https://github.com/ROU-Technology/email/blob/codex/product-engine-alignment/docs/product-plan/advancements/direct-inbound-contract.md). Reference/later components retain detailed implementation plans and canonical issues. A dependency build does not complete these features.

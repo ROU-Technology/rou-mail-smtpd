@@ -8,3 +8,12 @@ upstream rustls example documented in PATCHES.md. Full suite: 14 unit tests
 and 11 doc tests passed. These tests do not prove gateway admission hardening
 or public production SMTP safety; SMTPD-001 remains open. CI repeats the
 locked suite on Linux. No listener or live mail was started.
+
+
+24 October owner correction: complete library/direct-inbound implementation
+contracts now replace generic or research-only coverage. Read the product
+library-index.json and direct-inbound-contract.md. Generated local specs and
+canonical GitHub bodies were verified against current source; issue state/history
+was preserved. Source generation and whitespace checks passed. This increment
+changes planning/docs only; no runtime test, DNS, send or deployment occurred.
+Previous dependency/build CI does not satisfy these new feature acceptance gates.
