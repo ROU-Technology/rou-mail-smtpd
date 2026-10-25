@@ -40,6 +40,7 @@ use crate::Response;
 #[derive(Debug)]
 pub(crate) enum Error {
     Io,
+    Handler(crate::Error),
     InvalidLineEnding,
     MaxSizeExceeded {
         limit: usize,
@@ -57,13 +58,17 @@ impl TryInto<Response> for Error {
 
     fn try_into(self) -> Result<Response, Self::Error> {
         match self {
+            Self::Handler(crate::Error::Response(res)) => Ok(res),
+            Self::Handler(crate::Error::Abort) => Err(Self::Io),
             Self::InvalidLineEnding => Ok(Response::syntax_error("Invalid line ending")),
             Self::DecodeErr(e) => Ok(Response::syntax_error(format!(
                 "Invalid base64 encoding: {e}"
             ))),
-            Self::MaxSizeExceeded { limit } => Ok(Response::reject(format!(
-                "Message size limit {limit} exceeded."
-            ))),
+            Self::MaxSizeExceeded { limit } => Ok(Response::new(
+                552,
+                format!("Size limit {limit} exceeded"),
+                Some("5.3.4".into()),
+            )),
             Self::Response(res) => Ok(res),
             Self::Timeout => Ok(Response::Raw(
                 "421 4.4.2 ESMTP Service closing transmission channel after timeout exceeded"

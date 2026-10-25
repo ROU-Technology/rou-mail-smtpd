@@ -35,3 +35,6 @@ trust-dns-resolver = { version = "0.23.2", features = ["tokio-runtime"] }
 default = []
 native-tls-backend = ["dep:native-tls", "dep:tokio-native-tls"]
 rustls-backend = ["dep:rustls", "dep:tokio-rustls"]
+
+[dev-dependencies]
+rcgen = "0.14"

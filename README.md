@@ -11,7 +11,7 @@ of SMTP commands.
 - Asynchronous SMTP server using Tokio.
 - Supports authentication mechanisms: [`AuthMach::Plain`], [`AuthMach::Login`], [`AuthMach::CramMD5`].
 - TLS support (STARTTLS and implicit TLS) with optional `native-tls` (feature `native-tls-backend`) or `rustls` (feature `rustls-backend`) backend.
-- Customizable handlers for AUTH, RCPT, and DATA commands via the Handler struct's [`SmtpHandler::handle_auth`], [`SmtpHandler::handle_email`], and [`SmtpHandler::handle_rcpt`] method
+- Customizable handlers for AUTH, RCPT, and DATA commands via the Handler struct's [`SmtpHandler::handle_auth`], [`SmtpHandler::handle_data_end`], and [`SmtpHandler::handle_rcpt`] method
 - Configurable limits for message size and recipients.
 
 ### Example
@@ -82,3 +82,41 @@ impl smtpd::SmtpHandlerFactory for MyHandlerFactory {
 - `tls`: TLS configuration and provider utilities.
 - `stream`: Connection stream abstraction with read/write helpers.
 - `utils`: Parsing and helper functions for SMTP commands.
+
+
+## Complete cross-repository library coverage
+
+Read [the complete supplied-library map](https://github.com/ROU-Technology/email/blob/codex/product-engine-alignment/docs/product-plan/advancements/library-integration-map.md) and [direct receiving contract](https://github.com/ROU-Technology/email/blob/codex/product-engine-alignment/docs/product-plan/advancements/direct-inbound-contract.md). Reference/later components retain detailed implementation plans and canonical issues. A dependency build does not complete these features.
+
+
+## Current fork API: bounded streaming receipt
+
+This unreleased fork replaces full-message handle_email/Vec delivery with one
+streaming contract: handle_data_start prepares an authorised sink before the
+354 reply; handle_data_chunk consumes exact dot-unstuffed bytes with
+backpressure; handle_data_end confirms durable acceptance before the final 250.
+Default recipient/DATA hooks refuse. handle_data_abort and handle_reset clean up
+transient state only; never delete an accepted/possibly committed original.
+Process death/cancellation can skip async hooks, so durable recovery belongs to
+the product authority. No old callback adapter or buffering fallback is retained.
+
+SmtpConfig requires positive finite message/line/recipient/connection/handshake
+limits and I/O, DATA, connection and shutdown deadlines. max_message_size is
+mandatory usize; None/unlimited mode was removed. max_connections_per_ip and
+max_tls_handshakes are independently bounded and may not exceed
+max_connections. serve_until accepts a prebound Tokio listener and a shutdown
+future for bounded admission/draining. TLS handshakes run in separately
+budgeted session tasks; failure cannot panic/block the accept loop. Reverse DNS
+uses the remaining session deadline rather than a fixed delay. AUTH is hidden/
+refused before TLS. STARTTLS creates fresh session/handler state and a refused
+repeat returns503 without ending the session. A single refused RCPT or a
+transient non-transport DATA failure keeps the session and resets state. XCLIENT
+is refused unless configured and trusted, and cannot alter an active
+transaction. Lines require exact CRLF; no newline repair before DKIM.
+The library does not perform DNS authentication/scanning, store messages, commit
+product receipts or authorise relay recipients by itself.
+
+Run `cargo test --locked --features rustls-backend` and
+`cargo test --locked --no-default-features`. Integration tests bind real local
+TCP/TLS sockets and generate test certificates in memory with rcgen; sink
+acceptance is a synthetic transport fixture, not a real product/store pilot.

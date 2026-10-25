@@ -1,0 +1,11 @@
+[
+  {
+    "id": "SMTPD-001",
+    "title": "Harden the pinned async SMTP protocol library for the hosted gateway",
+    "phase": "HNR",
+    "status": "in progress",
+    "depends": [],
+    "advancement": "HNR-05",
+    "file": "features/smtpd-001.md"
+  }
+]

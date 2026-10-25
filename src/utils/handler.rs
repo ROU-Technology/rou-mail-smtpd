@@ -1,11 +1,18 @@
-use std::{net::IpAddr, time::{Duration, SystemTime, UNIX_EPOCH}};
+use std::{
+    net::IpAddr,
+    time::{Duration, SystemTime, UNIX_EPOCH},
+};
 
-use base64::engine::general_purpose;
 use base64::Engine;
+use base64::engine::general_purpose;
 use tokio::time::timeout;
 use trust_dns_resolver::TokioAsyncResolver;
 
-use crate::{core::{error::Error, stream::StreamController}, utils::parser::{parse_b64_line, parse_mail_from, parse_rcpt_to, parse_size}, AuthData, AuthMach, Response, Session};
+use crate::{
+    AuthData, AuthMach, Response, Session,
+    core::{error::Error, stream::StreamController},
+    utils::parser::{parse_b64_line, parse_mail_from, parse_rcpt_to, parse_size},
+};
 
 /// Internal helper to validate a STARTTLS command request.
 ///
@@ -278,16 +285,17 @@ pub async fn handle_mail_cmd<'a>(
 
     // Enforce authentication if required
     if session.smtp_config.require_auth && !session.authenticated {
-        return Err(Error::Response(Response::reject(
-            "Authentication required",
-        )));
+        return Err(Error::Response(Response::reject("Authentication required")));
     }
 
+    if session.remote_name.is_empty() {
+        return Err(Error::Response(Response::bad_sequence(
+            "HELO/EHLO required",
+        )));
+    }
     // Parse MAIL FROM argument
     let (from, params) = parse_mail_from(args.unwrap_or_default())
-        .ok_or_else(|| {
-            Error::Response(Response::syntax_error("Syntax error in FROM parameter"))
-        })?;
+        .ok_or_else(|| Error::Response(Response::syntax_error("Syntax error in FROM parameter")))?;
 
     // Validate SIZE parameter, if provided
     let size = params
@@ -302,7 +310,8 @@ pub async fn handle_mail_cmd<'a>(
         )));
     }
 
-    if let Some(max_size) = session.smtp_config.max_message_size {
+    {
+        let max_size = session.smtp_config.max_message_size;
         if let Some(s) = size {
             if s > max_size {
                 return Err(Error::Response(Response::new(
@@ -361,9 +370,7 @@ pub async fn extract_rcpt_from_arg<'a>(
 
     // Enforce authentication if required
     if session.smtp_config.require_auth && !session.authenticated {
-        return Err(Error::Response(Response::reject(
-            "Authentication required",
-        )));
+        return Err(Error::Response(Response::reject("Authentication required")));
     }
 
     // Ensure MAIL command has been issued
@@ -392,77 +399,43 @@ pub async fn extract_rcpt_from_arg<'a>(
     Ok(to.to_string())
 }
 
-/// Internal helper to read the message body after the DATA command.
-///
-/// This function validates the session state, enforces TLS and authentication requirements,
-/// ensures that MAIL and at least one RCPT command have been successfully processed,
-/// prompts the client to start sending mail data, and reads the message until the
-/// terminating line (`.<CRLF>`).
-///
-/// # Parameters
-/// - `session`: Mutable reference to the current [`Session`].
-/// - `controller`: Mutable reference to the [`StreamController`] handling read/write.
-///
-/// # Returns
-/// Returns the raw message data as a `Vec<u8>`.
-///
-/// # Errors
-/// Returns [`Error::Response`] with an appropriate [`Response`] if:
-/// - TLS is required but not active.
-/// - Authentication is required but not completed.
-/// - MAIL or RCPT commands have not yet been issued.
-pub async fn extract_mail_data<'a>(
-    session: &mut Session<'a>,
-    controller: &mut StreamController,
-) -> std::result::Result<Vec<u8>, Error> {
-    // Enforce TLS if required
+/// Check DATA admission state without consuming bytes or sending354.
+pub fn validate_data(session: &Session<'_>) -> std::result::Result<(), Error> {
     #[cfg(any(feature = "native-tls-backend", feature = "rustls-backend"))]
-    if session.smtp_config.tls_mode.tls_mandatory() && !controller.is_tls {
+    if session.smtp_config.tls_mode.tls_mandatory() && !session.tls {
         return Err(Error::Response(Response::reject(
-            "Must issue a STARTTLS command first",
+            "Must issue STARTTLS first",
         )));
     }
-
-    // Enforce authentication if required
     if session.smtp_config.require_auth && !session.authenticated {
-        return Err(Error::Response(Response::reject(
-            "Authentication required",
-        )));
+        return Err(Error::Response(Response::reject("Authentication required")));
     }
-
-    // Ensure MAIL & RCPT commands have been issued
     if !session.got_from || session.to.is_empty() {
         return Err(Error::Response(Response::bad_sequence(
-            "Bad sequence of commands (MAIL & RCPT required before DATA)",
+            "MAIL and RCPT required before DATA",
         )));
     }
-
-    // Prompt client to start sending the message body
-    controller
-        .write_line("354 Start mail input; end with <CR><LF>.<CR><LF>")
-        .await?;
-
-    // Read the message data with optional maximum size limit
-    let data = controller
-        .read_mail_data(session.smtp_config.max_message_size)
-        .await?;
-
-    Ok(data)
+    Ok(())
 }
 
 /// Performs a reverse DNS lookup for the given IP address using the provided resolver.
+/// The lookup is bounded by the caller's session timeout rather than a hidden
+/// fixed delay, so a slow resolver cannot hold the greeting or command loop open.
 /// Returns the first resolved hostname as a `String`, or `"unknown"` if the lookup fails or times out.
 ///
 /// # Parameters
 /// - `ip`: The IP address to resolve.
 /// - `resolver`: A reference to a `TokioAsyncResolver` instance.
+/// - `deadline`: Maximum time spent waiting for the resolver.
 ///
 /// # Returns
 /// A `String` representing the resolved hostname, or `"unknown"` if lookup fails.
-pub async fn get_remote_host(ip: IpAddr, resolver: &TokioAsyncResolver) -> String {
-    const TIMEOUT: Duration = Duration::from_secs(30);
-
-    match timeout(TIMEOUT, resolver.reverse_lookup(ip)).await {
+pub async fn get_remote_host(
+    ip: IpAddr,
+    resolver: &TokioAsyncResolver,
+    deadline: Duration,
+) -> String {
+    match timeout(deadline, resolver.reverse_lookup(ip)).await {
         Ok(Ok(lookup)) => lookup
             .iter()
             .next()

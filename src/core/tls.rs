@@ -46,16 +46,22 @@ use crate::{
 ///
 /// # #[cfg(feature = "rustls-backend")]
 /// # {
-///     let rustls_config = smtpd::ServerConfig::default();
+/// # fn configured(certificates: Vec<rustls::pki_types::CertificateDer<'static>>,
+/// #     private_key: rustls::pki_types::PrivateKeyDer<'static>) -> Result<(), rustls::Error> {
+///     let rustls_config = smtpd::ServerConfig::builder()
+///         .with_no_client_auth()
+///         .with_single_cert(certificates, private_key)?;
 ///     let tls_config = TlsConfig::Rustls(rustls_config);
 ///
-///     let config = SmtpConfig {
+///     let _config = SmtpConfig {
 ///         bind_addr: "127.0.0.1:2525".to_string(),
 ///         require_auth: true,
 ///         tls_mode: TlsMode::Required(tls_config),
 ///         auth_machs: vec![AuthMach::Plain, AuthMach::Login],
 ///         ..Default::default()
 ///     };
+/// # Ok(())
+/// # }
 /// # }
 /// ```
 #[derive(Clone)]
@@ -167,7 +173,7 @@ impl TlsProvider {
 /// let der: Vec<u8> = vec![];
 /// let identity = smtpd::Identity::from_pkcs12(der.as_slice(), "password").unwrap();
 /// let tls_config = TlsConfig::NativeTls(identity);
-/// 
+///
 /// // opportunistic tls
 /// let mode = TlsMode::Explicit(tls_config.clone());
 ///

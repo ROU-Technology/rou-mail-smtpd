@@ -8,8 +8,7 @@ use crate::{AuthData, Error, Response, Result, Session};
 ///
 /// - The **AUTH** handler must be implemented explicitly; otherwise,
 ///   authentication requests will return `502 Not Implemented`.
-/// - The **RCPT** and **EMAIL** handlers default to accepting all inputs
-///   unless overridden.
+/// - Recipient and DATA hooks refuse by default; implement durable acceptance explicitly.
 ///
 /// # Example
 ///
@@ -24,7 +23,7 @@ use crate::{AuthData, Error, Response, Result, Session};
 /// impl SmtpHandler for MyHandler {
 ///     async fn handle_auth(
 ///         &mut self,
-///         _session: &Session,
+///         _session: &Session<'_>,
 ///         data: AuthData,
 ///     ) -> Result {
 ///         let (username, password, _) = data.data();
@@ -40,7 +39,7 @@ use crate::{AuthData, Error, Response, Result, Session};
 ///
 ///     async fn handle_rcpt(
 ///         &mut self,
-///         _session: &Session,
+///         _session: &Session<'_>,
 ///         to: &str,
 ///     ) -> Result {
 ///         if to.ends_with("gmail.com") {
@@ -52,12 +51,10 @@ use crate::{AuthData, Error, Response, Result, Session};
 ///         }
 ///     }
 ///
-///     async fn handle_email(
+///     async fn handle_data_end(
 ///         &mut self,
-///         _session: &Session,
-///         data: Vec<u8>,
+///         _session: &Session<'_>,
 ///     ) -> Result {
-///         println!("Received message: {:?}", String::from_utf8_lossy(&data));
 ///         Ok(Response::ok("Ok: queued as <message-id>"))
 ///     }
 /// }
@@ -67,7 +64,7 @@ use crate::{AuthData, Error, Response, Result, Session};
 /// impl SmtpHandlerFactory for MyHandlerFactory {
 ///     type Handler = MyHandler;
 ///
-///     fn new_handler(&self, _session: &Session) -> Self::Handler {
+///     fn new_handler(&self, _session: &Session<'_>) -> Self::Handler {
 ///         MyHandler { user_id: None }
 ///     }
 /// }
@@ -78,8 +75,8 @@ use crate::{AuthData, Error, Response, Result, Session};
 /// | Method | Default Response | Description |
 /// |--------|------------------|--------------|
 /// | [`handle_auth`](Self::handle_auth) | `502 Not Implemented` | Must be implemented explicitly. |
-/// | [`handle_rcpt`](Self::handle_rcpt) | `250 OK` | Accepts all recipients. |
-/// | [`handle_email`](Self::handle_email) | `250 OK` | Accepts all messages. |
+/// | [`handle_rcpt`](Self::handle_rcpt) | `502 Not Implemented` | Refuses unwired recipients. |
+/// | [`handle_data_end`](Self::handle_data_end) | `502 Not Implemented` | Refuses unwired messages. |
 ///
 ///
 /// ## How It Works
@@ -98,7 +95,7 @@ use crate::{AuthData, Error, Response, Result, Session};
 /// use smtpd::{async_trait, SmtpHandlerFactory, SmtpHandler, Session};
 ///
 /// struct MyHandler { user_id: Option<usize> }
-/// 
+///
 /// #[async_trait]
 /// impl SmtpHandler for MyHandler{}
 ///
@@ -107,7 +104,7 @@ use crate::{AuthData, Error, Response, Result, Session};
 /// impl SmtpHandlerFactory for MyFactory {
 ///     type Handler = MyHandler;
 ///
-///     fn new_handler(&self, _session: &Session) -> Self::Handler {
+///     fn new_handler(&self, _session: &Session<'_>) -> Self::Handler {
 ///         MyHandler { user_id: None }
 ///     }
 /// }
@@ -121,7 +118,7 @@ pub trait SmtpHandler: Send + Sync {
     /// - `Ok(Response::default())` to indicate successful authentication.
     /// - `Err(Error::Response(...))` to reject with a custom SMTP message.
     /// - `Err(Error::Abort)` to immediately terminate the connection.
-    async fn handle_auth(&mut self, _: &Session, _: AuthData) -> Result {
+    async fn handle_auth(&mut self, _: &Session<'_>, _: AuthData) -> Result {
         Err(Error::Response(Response::not_implemented()))
     }
 
@@ -131,17 +128,41 @@ pub trait SmtpHandler: Send + Sync {
     /// - `Ok(Response::default())` to accept the recipient.
     /// - `Ok(Response::ok("Ok: queued as <message-id>"))` to include a message ID.
     /// - `Err(Error::Response(...))` to reject the recipient.
-    async fn handle_rcpt(&mut self, _: &Session, _: &str) -> Result {
-        Ok(Response::default())
+    async fn handle_rcpt(&mut self, _: &Session<'_>, _: &str) -> Result {
+        Err(Error::Response(Response::not_implemented()))
     }
+
+    /// Discard only per-transaction grants/sink state; preserve authenticated identity.
+    /// Never delete an accepted or possibly committed original. Cancellation/process
+    /// death may skip async hooks, so durable recovery cannot depend on this callback.
+    async fn handle_reset(&mut self, _: &Session<'_>) -> std::result::Result<(), Error> {
+        Ok(())
+    }
+
+    /// Allocate/authorise the caller's bounded sink before the server writes354.
+    async fn handle_data_start(&mut self, _: &Session<'_>) -> std::result::Result<(), Error> {
+        Err(Error::Response(Response::not_implemented()))
+    }
+
+    /// Consume one exact, dot-unstuffed chunk with backpressure. No retained borrow.
+    async fn handle_data_chunk(
+        &mut self,
+        _: &Session<'_>,
+        _: &[u8],
+    ) -> std::result::Result<(), Error> {
+        Err(Error::Response(Response::not_implemented()))
+    }
+
+    /// Failure cleanup only; never delete a possibly committed original.
+    async fn handle_data_abort(&mut self, _: &Session<'_>) {}
 
     /// Handles the `DATA` command (email body).
     ///
     /// Return:
     /// - `Ok(Response::default())` to accept the message.
     /// - `Err(Error::Response(...))` to reject with a custom SMTP response.
-    async fn handle_email(&mut self, _: &Session, _: Vec<u8>) -> Result {
-        Ok(Response::default())
+    async fn handle_data_end(&mut self, _: &Session<'_>) -> Result {
+        Err(Error::Response(Response::not_implemented()))
     }
 }
 
@@ -154,16 +175,16 @@ pub trait SmtpHandler: Send + Sync {
 /// use smtpd::{async_trait, SmtpHandlerFactory, SmtpHandler, Session};
 ///
 /// struct MyHandler;
-/// 
+///
 /// #[async_trait]
 /// impl SmtpHandler for MyHandler {}
-/// 
+///
 /// struct MyFactory;
 ///
 /// impl SmtpHandlerFactory for MyFactory {
 ///     type Handler = MyHandler;
 ///
-///     fn new_handler(&self, _session: &Session) -> Self::Handler {
+///     fn new_handler(&self, _session: &Session<'_>) -> Self::Handler {
 ///         MyHandler
 ///     }
 /// }
@@ -171,5 +192,5 @@ pub trait SmtpHandler: Send + Sync {
 pub trait SmtpHandlerFactory {
     type Handler: SmtpHandler + 'static;
 
-    fn new_handler(&self, session: &Session) -> Self::Handler;
+    fn new_handler(&self, session: &Session<'_>) -> Self::Handler;
 }
