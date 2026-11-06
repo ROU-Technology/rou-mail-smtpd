@@ -72,6 +72,11 @@ pub async fn handle_client<T: SmtpHandlerFactory + Send + Sync + 'static>(
         #[cfg(any(feature = "native-tls-backend", feature = "rustls-backend"))]
         controller.is_tls,
     );
+    #[cfg(any(feature = "native-tls-backend", feature = "rustls-backend"))]
+    session.set_tls_metadata(
+        controller.tls_version.clone(),
+        controller.tls_cipher.clone(),
+    );
     let mut handler = handler_factory.new_handler(&session);
     controller.set_line_limit(config.max_line_bytes);
 
@@ -133,6 +138,10 @@ pub async fn handle_client<T: SmtpHandlerFactory + Send + Sync + 'static>(
                                     addr.ip().to_string(),
                                     remote_host.clone(),
                                     true,
+                                );
+                                session.set_tls_metadata(
+                                    controller.tls_version.clone(),
+                                    controller.tls_cipher.clone(),
                                 );
                                 handler = handler_factory.new_handler(&session);
                                 controller.set_line_limit(config.max_line_bytes);

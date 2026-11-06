@@ -38,3 +38,11 @@ traffic occurred. SMTPD-001 stays open for fuzz/property coverage, native-TLS,
 sustained Linux RSS/CPU/fairness, public port25/DNS/TLS and combined
 GATE-002/004/005/006 acceptance. Source provenance with upstream SHA-256 hashes
 is recorded in docs/source-provenance.md.
+
+6 November 2026 TLS metadata checkpoint: handlers now receive the negotiated
+TLS protocol version and cipher suite (rustls; native-tls reports none). This
+removes the documented limitation that blocked complete peer facts for the
+separate submission gateway. Rust1.97.1 on macOS x86_64: rustls13 unit +22
+integration +11 doc tests; no-TLS13 unit +19 integration +11 doc tests, all
+passing. Native-TLS reporting, public port25/587/465 listener and certificate
+lifecycle, DNS, fuzz and combined gateway/store/product acceptance remain open.

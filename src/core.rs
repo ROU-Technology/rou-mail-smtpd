@@ -246,6 +246,42 @@ impl ConnectionStream {
             Self::Tcp(_) => false,
         }
     }
+
+    /// The negotiated TLS protocol version, when the active backend exposes it.
+    ///
+    /// The `native-tls` backend does not report negotiated parameters, so it
+    /// returns `None` here; callers must treat an absent value as unknown, not
+    /// as "no TLS".
+    #[cfg(any(feature = "native-tls-backend", feature = "rustls-backend"))]
+    pub fn tls_protocol_version(&self) -> Option<String> {
+        #[cfg(feature = "rustls-backend")]
+        if let Self::Rustls(stream) = self {
+            return stream
+                .get_ref()
+                .1
+                .protocol_version()
+                .map(|version| match version {
+                    rustls::ProtocolVersion::TLSv1_2 => "TLSv1.2".to_string(),
+                    rustls::ProtocolVersion::TLSv1_3 => "TLSv1.3".to_string(),
+                    other => format!("{other:?}"),
+                });
+        }
+        None
+    }
+
+    /// The negotiated TLS cipher suite, when the active backend exposes it.
+    #[cfg(any(feature = "native-tls-backend", feature = "rustls-backend"))]
+    pub fn tls_cipher_suite(&self) -> Option<String> {
+        #[cfg(feature = "rustls-backend")]
+        if let Self::Rustls(stream) = self {
+            return stream
+                .get_ref()
+                .1
+                .negotiated_cipher_suite()
+                .map(|suite| format!("{:?}", suite.suite()));
+        }
+        None
+    }
 }
 
 impl SmtpConfig {

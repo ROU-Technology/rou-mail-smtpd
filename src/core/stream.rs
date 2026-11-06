@@ -25,6 +25,14 @@ pub(crate) struct StreamController {
     #[cfg(any(feature = "native-tls-backend", feature = "rustls-backend"))]
     pub is_tls: bool,
 
+    /// Negotiated TLS protocol version, when the backend reports it.
+    #[cfg(any(feature = "native-tls-backend", feature = "rustls-backend"))]
+    pub tls_version: Option<String>,
+
+    /// Negotiated TLS cipher suite, when the backend reports it.
+    #[cfg(any(feature = "native-tls-backend", feature = "rustls-backend"))]
+    pub tls_cipher: Option<String>,
+
     /// Timeout duration applied to each read/write operation.
     timeout: core::time::Duration,
     line_limit: usize,
@@ -44,6 +52,10 @@ impl StreamController {
     pub fn new(stream: ConnectionStream, timeout: core::time::Duration) -> Self {
         #[cfg(any(feature = "native-tls-backend", feature = "rustls-backend"))]
         let is_tls = stream.is_tls();
+        #[cfg(any(feature = "native-tls-backend", feature = "rustls-backend"))]
+        let tls_version = stream.tls_protocol_version();
+        #[cfg(any(feature = "native-tls-backend", feature = "rustls-backend"))]
+        let tls_cipher = stream.tls_cipher_suite();
 
         let (read_half, write_half) = tokio::io::split(stream);
         Self {
@@ -51,6 +63,10 @@ impl StreamController {
             writer: BufWriter::new(write_half),
             #[cfg(any(feature = "native-tls-backend", feature = "rustls-backend"))]
             is_tls,
+            #[cfg(any(feature = "native-tls-backend", feature = "rustls-backend"))]
+            tls_version,
+            #[cfg(any(feature = "native-tls-backend", feature = "rustls-backend"))]
+            tls_cipher,
             timeout,
             line_limit: 1001,
         }

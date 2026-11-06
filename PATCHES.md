@@ -75,3 +75,34 @@ DNS/port25, fuzz or sustained Linux capacity gates. Reversal: drain and stop
 new admission first; the per-IP limiter and stricter refusals may be relaxed
 only as a whole config change, never by reintroducing unauthenticated relay,
 buffering or a compatibility callback shim.
+
+6 November 2026 — negotiated TLS metadata for authenticated submission
+
+Upstream gap: handlers could observe only `Session::is_tls()`. The negotiated
+protocol version and cipher suite were discarded before the session existed,
+so the submission gateway could not publish complete peer facts and the
+product receipt contract refused every TLS commit with `invalid_peer`.
+
+src/core.rs adds `ConnectionStream::tls_protocol_version` and
+`tls_cipher_suite`; the rustls backend reads the completed handshake's
+`protocol_version()` and `negotiated_cipher_suite()`, while the native-tls
+backend reports `None` because that backend does not expose negotiated
+parameters. src/core/stream.rs copies both facts into `StreamController`;
+src/core/session.rs adds public `tls_version`/`tls_cipher` fields and
+`set_tls_metadata`; src/handler.rs populates them for implicit TLS and again
+after STARTTLS recreates the session. Absent facts stay `None` and are never
+synthesised.
+
+tests/streaming.rs adds `reports_negotiated_tls_metadata_to_handlers`: one
+cleartext transaction and one STARTTLS transaction on the same connection
+assert that the plain session reports no negotiated parameters while the
+secured session reports TLSv1.3 and a TLS1.3 cipher suite.
+
+macOS x86_64 Rust 1.97.1: rustls 13 unit + 22 integration + 11 doc tests pass;
+no-TLS 13 unit + 19 integration + 11 doc tests pass. Linux CI repeats both.
+Public listener/DNS/certificate lifecycle, native-TLS reporting and combined
+GATE-002/004/005/006 acceptance remain open.
+
+Reversal: the new fields are observations only and never admit a session;
+consumers that ignore them are unaffected. Never fabricate TLS facts when the
+transport cannot report them, and preserve accepted identities on downgrade.

@@ -50,6 +50,14 @@ pub struct Session<'a> {
     #[cfg(any(feature = "native-tls-backend", feature = "rustls-backend"))]
     pub tls: bool,
 
+    /// Negotiated TLS protocol version, when the transport reports it.
+    #[cfg(any(feature = "native-tls-backend", feature = "rustls-backend"))]
+    pub tls_version: Option<String>,
+
+    /// Negotiated TLS cipher suite, when the transport reports it.
+    #[cfg(any(feature = "native-tls-backend", feature = "rustls-backend"))]
+    pub tls_cipher: Option<String>,
+
     /// Tracks whether the session has received a valid `MAIL FROM` command.
     pub got_from: bool,
 }
@@ -74,6 +82,10 @@ impl<'a> Session<'a> {
             authenticated: false,
             #[cfg(any(feature = "native-tls-backend", feature = "rustls-backend"))]
             tls: is_tls,
+            #[cfg(any(feature = "native-tls-backend", feature = "rustls-backend"))]
+            tls_version: None,
+            #[cfg(any(feature = "native-tls-backend", feature = "rustls-backend"))]
+            tls_cipher: None,
             from: String::with_capacity(256),
             remote_name: String::with_capacity(256),
             smtp_config: config,
@@ -109,6 +121,14 @@ impl<'a> Session<'a> {
     #[inline]
     pub fn is_tls(&self) -> bool {
         self.tls
+    }
+
+    /// Records the negotiated TLS protocol version and cipher suite.
+    #[cfg(any(feature = "native-tls-backend", feature = "rustls-backend"))]
+    #[inline]
+    pub fn set_tls_metadata(&mut self, version: Option<String>, cipher: Option<String>) {
+        self.tls_version = version;
+        self.tls_cipher = cipher;
     }
 
     /// Returns `true` if the session is authenticated.

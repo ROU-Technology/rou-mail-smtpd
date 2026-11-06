@@ -16,6 +16,8 @@ struct Observed {
     chunks: Vec<Vec<u8>>,
     envelopes: Vec<(String, Vec<String>)>,
     peers: Vec<(String, String)>,
+    #[cfg(any(feature = "native-tls-backend", feature = "rustls-backend"))]
+    tls: Vec<(Option<String>, Option<String>)>,
     finishes: usize,
     aborts: usize,
     reset_envelopes: Vec<Vec<String>>,
@@ -53,6 +55,10 @@ impl SmtpHandler for Handler {
         state
             .peers
             .push((s.remote_ip.clone(), s.remote_host.clone()));
+        #[cfg(any(feature = "native-tls-backend", feature = "rustls-backend"))]
+        state
+            .tls
+            .push((s.tls_version.clone(), s.tls_cipher.clone()));
         Ok(())
     }
     async fn handle_data_chunk(&mut self, _: &Session<'_>, bytes: &[u8]) -> Result<(), Error> {
@@ -132,6 +138,28 @@ async fn reply(client: &mut BufReader<TcpStream>) -> String {
 async fn command(client: &mut BufReader<TcpStream>, command: &[u8]) -> String {
     client.get_mut().write_all(command).await.unwrap();
     reply(client).await
+}
+
+#[cfg(feature = "rustls-backend")]
+async fn tls_command(
+    client: &mut BufReader<tokio_rustls::client::TlsStream<TcpStream>>,
+    command: &[u8],
+) -> String {
+    client.get_mut().write_all(command).await.unwrap();
+    let mut all = String::new();
+    loop {
+        let mut line = String::new();
+        tokio::time::timeout(Duration::from_secs(2), client.read_line(&mut line))
+            .await
+            .unwrap()
+            .unwrap();
+        assert!(!line.is_empty(), "unexpected EOF: {all}");
+        let more = line.as_bytes().get(3) == Some(&b'-');
+        all.push_str(&line);
+        if !more {
+            return all;
+        }
+    }
 }
 async fn envelope(client: &mut BufReader<TcpStream>) {
     let ehlo = command(client, b"EHLO sender.example\r\n").await;
@@ -600,6 +628,101 @@ async fn starttls_discards_envelope_and_only_advertises_auth_after_encryption() 
     drop(secured);
     stop.send(()).unwrap();
     task.await.unwrap().unwrap();
+}
+
+#[cfg(feature = "rustls-backend")]
+#[tokio::test]
+async fn reports_negotiated_tls_metadata_to_handlers() {
+    let _ = rustls::crypto::aws_lc_rs::default_provider().install_default();
+    let rcgen::CertifiedKey { cert, signing_key } =
+        rcgen::generate_simple_self_signed(vec!["localhost".into()]).unwrap();
+    let key = rustls::pki_types::PrivateKeyDer::Pkcs8(signing_key.serialize_der().into());
+    let tls = rustls::ServerConfig::builder()
+        .with_no_client_auth()
+        .with_single_cert(vec![cert.der().clone()], key)
+        .unwrap();
+    let config = SmtpConfig {
+        tls_mode: smtpd::TlsMode::Explicit(smtpd::TlsConfig::Rustls(tls)),
+        ..Default::default()
+    };
+    let (port, stop, task, state) = start(config, false, false).await;
+    let mut plain = connect(port).await;
+    assert!(
+        command(&mut plain, b"EHLO plain.example\r\n")
+            .await
+            .contains("STARTTLS")
+    );
+    assert!(
+        command(&mut plain, b"MAIL FROM:<>\r\n")
+            .await
+            .starts_with("250")
+    );
+    assert!(
+        command(&mut plain, b"RCPT TO:<plain@example.org>\r\n")
+            .await
+            .starts_with("250")
+    );
+    assert!(command(&mut plain, b"DATA\r\n").await.starts_with("354"));
+    assert!(
+        command(&mut plain, b"cleartext\r\n.\r\n")
+            .await
+            .starts_with("250")
+    );
+    assert!(
+        command(&mut plain, b"STARTTLS\r\n")
+            .await
+            .starts_with("220")
+    );
+    let mut roots = rustls::RootCertStore::empty();
+    roots.add(cert.der().clone()).unwrap();
+    let client_config = rustls::ClientConfig::builder()
+        .with_root_certificates(roots)
+        .with_no_client_auth();
+    let connector = tokio_rustls::TlsConnector::from(Arc::new(client_config));
+    let secured = connector
+        .connect("localhost".try_into().unwrap(), plain.into_inner())
+        .await
+        .unwrap();
+    let mut secured = BufReader::new(secured);
+    assert!(
+        !tls_command(&mut secured, b"EHLO secure.example\r\n")
+            .await
+            .contains("AUTH")
+    );
+    assert!(
+        tls_command(&mut secured, b"MAIL FROM:<>\r\n")
+            .await
+            .starts_with("250")
+    );
+    assert!(
+        tls_command(&mut secured, b"RCPT TO:<secure@example.org>\r\n")
+            .await
+            .starts_with("250")
+    );
+    assert!(
+        tls_command(&mut secured, b"DATA\r\n")
+            .await
+            .starts_with("354")
+    );
+    assert!(
+        tls_command(&mut secured, b"ciphertext\r\n.\r\n")
+            .await
+            .starts_with("250")
+    );
+    drop(secured);
+    stop.send(()).unwrap();
+    task.await.unwrap().unwrap();
+    let observed = state.lock().unwrap();
+    assert_eq!(observed.tls.len(), 2);
+    assert_eq!(observed.tls[0], (None, None));
+    let (version, cipher) = observed.tls[1].clone();
+    assert_eq!(version.as_deref(), Some("TLSv1.3"));
+    assert!(
+        cipher
+            .as_ref()
+            .is_some_and(|name| name.starts_with("TLS13_")),
+        "cipher suite must be reported: {cipher:?}"
+    );
 }
 
 #[tokio::test]
